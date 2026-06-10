@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  namespace: boutique
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-service
+  template:
+    metadata:
+      labels:
+        app: user-service
+    spec:
+      containers:
+        - name: user-service
+          image: us-central1-docker.pkg.dev/project-d7cf163f-d55b-4c30-a72/boutique-repo/user-service:latest
+          ports:
+            - containerPort: 3006
+          env:
+            - name: NODE_ENV
+              value: development
+            - name: PORT
+              value: "3006"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: boutique-secrets
+                  key: USERS_DB_URL
+
+--- 
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service
+  namespace: boutique
+spec:
+  selector:
+    app: user-service
+  ports:
+    - protocol: TCP
+      port: 3006
+      targetPort: 3006
+  type: ClusterIP

@@ -1,0 +1,97 @@
+name: Boutique CI Pipeline
+
+on:
+  workflow_dispatch:
+
+env:
+  GCP_REGION: ${{ secrets.GCP_REGION }}
+  IMAGE_TAG: ${{ github.sha }}
+  REGISTRY: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/boutique-repo
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    strategy:
+      matrix:
+        service:
+          - auth
+          - gateway
+          - orders
+          - order-service
+          - product-service
+          - user-service
+          - frontend
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build Docker Image
+        run: |
+          if [ "${{ matrix.service }}" == "frontend" ]; then
+            BUILD_PATH="projects/boutique-microservices/frontend"
+          else
+            BUILD_PATH="projects/boutique-microservices/backend/services/${{ matrix.service }}"
+          fi
+
+          echo "Building from $BUILD_PATH"
+
+          docker build \
+            -t ${{ env.REGISTRY }}/${{ matrix.service }}:$IMAGE_TAG \
+            $BUILD_PATH
+
+      - name: Push Docker Image
+        run: |
+          IMAGE_URI=${{ env.REGISTRY }}/${{ matrix.service }}:${{ github.sha }}
+          echo "Pushing $IMAGE_URI"
+          docker push $IMAGE_URI
+
+  update-manifests:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update image tags in k8s manifests
+        run: |
+          NEW_TAG=${{ github.sha }}
+          REGISTRY="${{ env.REGISTRY }}"
+
+          for SERVICE in auth gateway orders order-service product-service user-service; do
+            MANIFEST="gitops/k8s/backend/${SERVICE}.yml"
+            sed -i "s|image:.*${SERVICE}:.*|image: ${REGISTRY}/${SERVICE}:${NEW_TAG}|g" $MANIFEST
+          done
+
+          sed -i "s|image:.*frontend:.*|image: ${REGISTRY}/frontend:${NEW_TAG}|g" gitops/k8s/frontend/deployment.yml
+
+      - name: Commit and push updated manifests
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add gitops/k8s/
+          git diff --staged --quiet || git commit -m "ci: update image tags to ${{ github.sha }}"
+          git push
+
